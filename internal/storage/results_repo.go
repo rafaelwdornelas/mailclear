@@ -155,21 +155,34 @@ type GlobalStats struct {
 }
 
 // Global devolve estatísticas globais agregadas.
+//
+// IMPORTANTE: agrega da tabela `jobs` (pequena, dezenas a centenas de linhas)
+// e não de `emails` (potencialmente bilhões). A antiga implementação fazia
+// count(*) FILTER em emails levava 20+ segundos com 10M linhas.
+//
+// Os contadores em jobs (processed, valid, invalid, risky, disposable, unknown)
+// são atualizados a cada batch via JobsRepo.IncrementProgress, então a soma
+// reflete o estado real de tudo que já foi processado.
+//
+// UniqueDomains é caro de calcular (count DISTINCT em emails) — devolve 0
+// se a opção de count distinto não estiver habilitada. Quem precisar tem
+// o endpoint dedicado em GlobalWithDomains.
 func (r *ResultsRepo) Global(ctx context.Context) (*GlobalStats, error) {
 	var s GlobalStats
 	err := r.pool.QueryRow(ctx, `
 		SELECT
-		    count(*),
-		    count(*) FILTER (WHERE status = 'valid'),
-		    count(*) FILTER (WHERE status = 'invalid'),
-		    count(*) FILTER (WHERE status = 'risky'),
-		    count(*) FILTER (WHERE status = 'disposable'),
-		    count(*) FILTER (WHERE status = 'unknown'),
-		    count(DISTINCT domain)
-		FROM emails
-	`).Scan(&s.Total, &s.Valid, &s.Invalid, &s.Risky, &s.Disposable, &s.Unknown, &s.UniqueDomains)
+		    coalesce(sum(processed),  0)::bigint,
+		    coalesce(sum(valid),      0)::bigint,
+		    coalesce(sum(invalid),    0)::bigint,
+		    coalesce(sum(risky),      0)::bigint,
+		    coalesce(sum(disposable), 0)::bigint,
+		    coalesce(sum(unknown),    0)::bigint
+		FROM jobs
+	`).Scan(&s.Total, &s.Valid, &s.Invalid, &s.Risky, &s.Disposable, &s.Unknown)
 	if err != nil {
 		return nil, err
 	}
+	// UniqueDomains não está disponível via jobs — fica em 0.
+	// Quem precisa pode usar endpoint separado que faz a query cara.
 	return &s, nil
 }
