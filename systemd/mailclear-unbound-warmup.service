@@ -1,0 +1,17 @@
+[Unit]
+Description=MailClear — Pre-load Unbound DNS cache com top mail providers
+After=unbound.service
+Requires=unbound.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/mailclear-unbound-warmup
+RemainAfterExit=no
+TimeoutStartSec=120s
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mailclear-warmup
+
+[Install]
+WantedBy=multi-user.target

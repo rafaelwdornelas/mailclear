@@ -1,0 +1,41 @@
+[Unit]
+Description=MailClear Worker (validação batch)
+Documentation=https://github.com/rafaelwdornelas/mailclear
+After=network-online.target postgresql.service redis-server.service unbound.service mailclear-api.service
+Wants=network-online.target
+Requires=postgresql.service unbound.service
+
+[Service]
+Type=notify
+User=mailclear
+Group=mailclear
+ExecStart=/opt/mailclear/bin/mailclear-worker
+Restart=on-failure
+RestartSec=5s
+
+LimitNOFILE=1048576
+LimitNPROC=65535
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ReadWritePaths=/var/lib/mailclear /var/log/mailclear
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mailclear-worker
+
+TimeoutStopSec=120s
+KillMode=mixed
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target

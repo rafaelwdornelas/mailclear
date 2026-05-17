@@ -1,0 +1,248 @@
+openapi: 3.1.0
+info:
+  title: MailClear API
+  version: 1.0.0
+  description: |
+    API REST de pré-validação e limpeza de listas de emails.
+    Reduz custo de APIs pagas (Ninja/ZeroBounce) eliminando emails inválidos localmente.
+  contact:
+    name: rafaelwdornelas
+servers:
+  - url: http://localhost:8181
+    description: Servidor local (dev/produção)
+
+security:
+  - bearerAuth: []
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  schemas:
+    Reason:
+      type: object
+      properties:
+        code:   { type: string }
+        message: { type: string }
+    Email:
+      type: object
+      properties:
+        email_original:   { type: string }
+        email_normalized: { type: string }
+        local_part:       { type: string }
+        domain:           { type: string }
+        has_mx:           { type: boolean }
+        has_a:            { type: boolean }
+        is_disposable:    { type: boolean }
+        is_role:          { type: boolean }
+        is_free:          { type: boolean }
+        suggested:        { type: string, nullable: true }
+        status:           { type: string, enum: [valid, invalid, risky, unknown, disposable] }
+        score:            { type: integer, minimum: 0, maximum: 100 }
+        classification:   { type: string }
+        reasons:
+          type: array
+          items: { $ref: '#/components/schemas/Reason' }
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+        code:  { type: string }
+    Job:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        status: { type: string, enum: [pending, running, paused, completed, failed, cancelled] }
+        total: { type: integer }
+        processed: { type: integer }
+        valid: { type: integer }
+        invalid: { type: integer }
+        risky: { type: integer }
+        unknown: { type: integer }
+        disposable: { type: integer }
+        created_at: { type: string, format: date-time }
+        started_at: { type: string, format: date-time, nullable: true }
+        finished_at: { type: string, format: date-time, nullable: true }
+
+paths:
+  /healthz:
+    get:
+      summary: Liveness probe
+      security: []
+      responses:
+        '200': { description: ok }
+  /readyz:
+    get:
+      summary: Readiness probe (DB + Redis + DNS)
+      security: []
+      responses:
+        '200': { description: ok }
+        '503': { description: alguma dependência fora }
+  /metrics:
+    get:
+      summary: Prometheus
+      security: []
+      responses:
+        '200': { description: métricas }
+
+  /api/v1/validate:
+    post:
+      summary: Valida um email síncrono
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string }
+      responses:
+        '200':
+          description: resultado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Email' }
+
+  /api/v1/validate/batch:
+    post:
+      summary: Valida um lote síncrono (até 1000 emails)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [emails]
+              properties:
+                emails:
+                  type: array
+                  items: { type: string }
+      responses:
+        '200':
+          description: resultados
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total: { type: integer }
+                  results:
+                    type: array
+                    items: { $ref: '#/components/schemas/Email' }
+
+  /api/v1/import/csv:
+    post:
+      summary: Upload CSV → cria job assíncrono
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '202':
+          description: job criado
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job_id: { type: string, format: uuid }
+                  status: { type: string }
+                  total:  { type: integer }
+
+  /api/v1/jobs:
+    get:
+      summary: Lista jobs
+      parameters:
+        - { name: limit,  in: query, schema: { type: integer, default: 50 } }
+        - { name: offset, in: query, schema: { type: integer, default: 0 } }
+      responses:
+        '200':
+          description: lista
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  jobs:
+                    type: array
+                    items: { $ref: '#/components/schemas/Job' }
+
+  /api/v1/jobs/{id}:
+    get:
+      summary: Status do job
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: job
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+
+  /api/v1/jobs/{id}/results:
+    get:
+      summary: Resultados paginados (cursor)
+      parameters:
+        - { name: id,     in: path,  required: true, schema: { type: string, format: uuid } }
+        - { name: after,  in: query, schema: { type: integer, default: 0 } }
+        - { name: status, in: query, schema: { type: string } }
+        - { name: limit,  in: query, schema: { type: integer, default: 100 } }
+      responses:
+        '200':
+          description: página
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items: { $ref: '#/components/schemas/Email' }
+                  next_cursor: { type: integer }
+
+  /api/v1/jobs/{id}/export.csv:
+    get:
+      summary: Exporta resultados em CSV (streaming)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: CSV
+          content:
+            text/csv: {}
+
+  /api/v1/jobs/{id}/cancel:
+    post:
+      summary: Cancela job em execução
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: ok }
+
+  /api/v1/stats:
+    get:
+      summary: Estatísticas globais
+      responses:
+        '200':
+          description: stats
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total:           { type: integer }
+                  valid:           { type: integer }
+                  invalid:         { type: integer }
+                  risky:           { type: integer }
+                  disposable:      { type: integer }
+                  unknown:         { type: integer }
+                  unique_domains:  { type: integer }

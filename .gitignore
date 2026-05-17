@@ -1,0 +1,31 @@
+# Binários compilados
+/bin/
+*.exe
+*.test
+*.out
+
+# Logs
+*.log
+/var/log/
+
+# Dados locais
+/data/
+/tmp/
+*.csv
+!sample_*.csv
+
+# Coverage
+coverage.out
+coverage.html
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Go
+vendor/
+
+# Memória/anotações de IA
+.claude/
