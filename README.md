@@ -81,7 +81,8 @@ O script (idempotente, pode rodar várias vezes):
 5. Compila os 4 binários para `/opt/mailclear/bin/`.
 6. Roda migrations.
 7. Instala e habilita `mailclear-api.service`, `mailclear-worker.service`, `mailclear-unbound-warmup.service`.
-8. Smoke test em `localhost:8181/readyz`.
+8. Instala regra polkit ([deploy/polkit/10-mailclear.rules](deploy/polkit/10-mailclear.rules)) que permite ao user `mailclear` reiniciar suas próprias units sem senha, e adiciona o user ao grupo `systemd-journal` para o dashboard ler logs sem sudo.
+9. Smoke test em `localhost:8181/readyz`.
 
 Toda configuração é hardcoded em [internal/config/defaults.go](internal/config/defaults.go) — sem `.env`, sem YAML. Para ajustar workers, batch size, timeouts: edita o arquivo e roda `sudo bash install.sh` de novo.
 
@@ -96,7 +97,14 @@ sudo bash uninstall.sh --purge --yes    # remove tudo incluindo DB
 
 ### Dashboard
 
-`http://<servidor>:8181/` — visão geral em HTML com stats, jobs ativos, métricas DNS, AIMD.
+`http://<servidor>:8181/` — SPA HTML que polla `/admin/status` a cada 5s. Mostra:
+
+- Badges de serviços (api/db/dns/redis) inline no header.
+- Cards de runtime (uptime, goroutines, memória), cache, throughput (queue depth, AIMD limit, jobs em execução) e estatísticas globais.
+- Card destacado em amarelo **"Jobs travados"** (running > 5min sem progresso) com botão para marcar como `failed`.
+- Tabela de jobs recentes com botão **"Re-enfileirar"** em jobs falhados.
+- Botões para reiniciar `mailclear-api` ou `mailclear-worker` **direto pelo navegador** (via D-Bus + polkit, sem sudo).
+- Modal de logs com tail ao vivo via Server-Sent Events (sem precisar SSH no servidor).
 
 ### Validar um email
 
@@ -142,6 +150,11 @@ Para processar listas gigantes (milhões de emails) sem precisar rodar `curl` na
 
 ### Operação
 
+A maior parte das operações comuns está exposta no dashboard sem precisar SSH:
+reiniciar serviços, ler logs ao vivo, destravar/re-enfileirar jobs, limpar cache,
+recarregar lista de disposable. A linha de comando continua disponível pra
+quando o próprio dashboard estiver fora:
+
 ```bash
 # Status dos serviços
 systemctl status mailclear-api mailclear-worker unbound postgresql redis-server
@@ -170,12 +183,21 @@ journalctl -u mailclear-api -f | grep aimd
 | GET  | `/api/v1/jobs/{id}/results` | Resultados (paginação cursor) |
 | GET  | `/api/v1/jobs/{id}/export.csv` | Stream CSV completo |
 | POST | `/api/v1/jobs/{id}/cancel` | Cancela job em execução |
+| POST | `/api/v1/jobs/{id}/requeue` | Cria job novo com os mesmos emails do original |
 | GET  | `/api/v1/stats` | Estatísticas globais |
-| GET  | `/admin/status` | JSON com estado do sistema |
+| GET  | `/admin/status` | JSON com estado do sistema (serviços, throughput, jobs travados) |
+| POST | `/admin/cache/clear` | Limpa LRU L1 + keys Redis com prefixo `mailclear:` |
+| POST | `/admin/disposable/reload` | Recarrega lista de disposable do banco pra memória |
+| POST | `/admin/jobs/cancel-all` | Cancela em batch todos os jobs em pending/running/paused |
+| POST | `/admin/jobs/{id}/force-fail` | Marca job como `failed` sem esperar o timeout natural (24h) |
+| POST | `/admin/services/restart?service=api\|worker` | Restart de serviço via D-Bus (sem sudo, requer polkit rule) |
+| GET  | `/admin/logs?service=api\|worker&lines=N` | Últimas N linhas do journal (texto plano) |
+| GET  | `/admin/logs/stream?service=api\|worker` | Tail -f ao vivo do journal via Server-Sent Events |
 | GET  | `/healthz` | Liveness probe |
 | GET  | `/readyz` | Readiness (DB + Redis + DNS) |
 | GET  | `/metrics` | Prometheus exposition |
 
+Sem autenticação por padrão — uso esperado é local (127.0.0.1) ou atrás de firewall/proxy.
 Spec OpenAPI completa em [api/openapi.yaml](api/openapi.yaml).
 
 ## Score Engine
@@ -200,7 +222,7 @@ Classificação:
 - **40-79** → `risky` (vale enviar pra API paga)
 - **< 40** → `invalid` (descarta)
 
-Tabela de pesos em [internal/validation/score/weights.go](internal/validation/score/weights.go).
+Tabela de pesos em [internal/validation/scoring.go](internal/validation/scoring.go).
 
 ## Desenvolvimento
 
@@ -234,6 +256,7 @@ mailclear/
 ├── api/openapi.yaml     # spec da API
 ├── etc/                 # configs de /etc copiadas pelo install.sh
 ├── systemd/             # units .service
+├── deploy/polkit/       # regra polkit pra restart sem sudo
 └── scripts/             # bench, seed wrappers
 ```
 
