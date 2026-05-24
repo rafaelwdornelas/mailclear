@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/rs/zerolog/log"
 )
 
 // Multi compõe L1 (in-memory) e L2 (Redis) em cascata.
@@ -30,7 +32,9 @@ func (m *Multi[V]) Get(ctx context.Context, key string) (V, error) {
 	if m.L2 != nil {
 		if v, err := m.L2.Get(ctx, key); err == nil {
 			if m.L1 != nil {
-				_ = m.L1.Set(ctx, key, v, 0)
+				if err := m.L1.Set(ctx, key, v, 0); err != nil {
+					log.Warn().Err(err).Str("key", key).Msg("L1 set falhou ao re-popular de L2")
+				}
 			}
 			return v, nil
 		} else if !errors.Is(err, ErrMiss) {
@@ -46,7 +50,9 @@ func (m *Multi[V]) Get(ctx context.Context, key string) (V, error) {
 // Set grava em ambas as camadas. ttl é usado em L2; L1 usa ttl também (clamped).
 func (m *Multi[V]) Set(ctx context.Context, key string, val V, ttl time.Duration) error {
 	if m.L1 != nil {
-		_ = m.L1.Set(ctx, key, val, ttl)
+		if err := m.L1.Set(ctx, key, val, ttl); err != nil {
+			log.Warn().Err(err).Str("key", key).Msg("L1 set falhou")
+		}
 	}
 	if m.L2 != nil {
 		return m.L2.Set(ctx, key, val, ttl)
@@ -57,7 +63,9 @@ func (m *Multi[V]) Set(ctx context.Context, key string, val V, ttl time.Duration
 // Delete remove de ambas as camadas.
 func (m *Multi[V]) Delete(ctx context.Context, key string) error {
 	if m.L1 != nil {
-		_ = m.L1.Delete(ctx, key)
+		if err := m.L1.Delete(ctx, key); err != nil {
+			log.Warn().Err(err).Str("key", key).Msg("L1 delete falhou")
+		}
 	}
 	if m.L2 != nil {
 		return m.L2.Delete(ctx, key)

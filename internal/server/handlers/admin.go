@@ -16,45 +16,57 @@ import (
 	"github.com/rafaelwdornelas/mailclear/internal/validation/disposable"
 )
 
+// PoolStats é o subset de workers.Pool que o admin handler precisa.
+// Definido como interface pra evitar import circular.
+type PoolStats interface {
+	QueueLen() int
+	QueueCap() int
+	QueueUsage() float64
+}
+
 // AdminHandlers expõe endpoints de status agregado e ações administrativas.
 // Usado pelo dashboard HTML em GET /.
 type AdminHandlers struct {
-	DB           *pgxpool.Pool
-	Redis        *redis.Client
-	DNSServer    string
-	DNSCache     *cache.Multi[mdns.MXResult]
-	DispRegistry *disposable.Registry
-	DispRepo     *storage.DisposableRepo
-	JobsRepo     *storage.JobsRepo
-	ResultsRepo  *storage.ResultsRepo
+	DB             *pgxpool.Pool
+	Redis          *redis.Client
+	DNSServer      string
+	DNSCache       *cache.Multi[mdns.MXResult]
+	DNSResolver    *mdns.Resolver
+	DispRegistry   *disposable.Registry
+	DispRepo       *storage.DisposableRepo
+	JobsRepo       *storage.JobsRepo
+	ResultsRepo    *storage.ResultsRepo
+	Pool           PoolStats
 	RedisKeyPrefix string
-	Version      string
-	StartedAt    time.Time
+	Version        string
+	StartedAt      time.Time
 }
 
 // StatusResponse agrega tudo o que o dashboard consome.
 type StatusResponse struct {
-	Version       string                 `json:"version"`
-	UptimeSeconds int64                  `json:"uptime_seconds"`
-	Now           time.Time              `json:"now"`
-	Services      map[string]string      `json:"services"`
-	Stats         *storage.GlobalStats   `json:"stats"`
-	Jobs          []*storage.Job         `json:"jobs"`
-	Cache         CacheStats             `json:"cache"`
-	Disposable    DisposableStats        `json:"disposable"`
-	Runtime       RuntimeStats           `json:"runtime"`
+	Version       string               `json:"version"`
+	UptimeSeconds int64                `json:"uptime_seconds"`
+	Now           time.Time            `json:"now"`
+	Services      map[string]string    `json:"services"`
+	Stats         *storage.GlobalStats `json:"stats"`
+	Jobs          []*storage.Job       `json:"jobs"`
+	StuckJobs     []*storage.Job       `json:"stuck_jobs"`
+	Cache         CacheStats           `json:"cache"`
+	Disposable    DisposableStats      `json:"disposable"`
+	Runtime       RuntimeStats         `json:"runtime"`
+	Throughput    ThroughputStats      `json:"throughput"`
 }
 
-// CacheStats agrega contadores de cache.
+// CacheStats agrega contadores de cache. Removido `redis_keys` (DBSize do Redis
+// contava chaves de OUTROS apps no mesmo Redis — métrica enganosa).
 type CacheStats struct {
-	RedisKeys      int64 `json:"redis_keys"`
 	RedisMemoryHuman string `json:"redis_memory_human"`
 }
 
-// DisposableStats info sobre a lista de disposable.
+// DisposableStats info sobre a lista de disposable. Removido `db_size`
+// (redundante: só muda em recarga manual; o tamanho que importa é o in-memory).
 type DisposableStats struct {
 	InMemorySize int `json:"in_memory_size"`
-	DBSize       int64 `json:"db_size"`
 }
 
 // RuntimeStats info do runtime Go.
@@ -64,6 +76,16 @@ type RuntimeStats struct {
 	GoVersion  string `json:"go_version"`
 	MemAllocMB uint64 `json:"mem_alloc_mb"`
 	MemSysMB   uint64 `json:"mem_sys_mb"`
+}
+
+// ThroughputStats reflete o estado de processamento ao vivo.
+type ThroughputStats struct {
+	QueueLen    int     `json:"queue_len"`
+	QueueCap    int     `json:"queue_cap"`
+	QueueUsage  float64 `json:"queue_usage"`
+	DNSLimit    int     `json:"dns_limit"`
+	DNSInflight int64   `json:"dns_inflight"`
+	JobsRunning int64   `json:"jobs_running"`
 }
 
 // Status devolve o estado agregado em JSON. Consumido pelo dashboard via fetch().
@@ -155,16 +177,11 @@ func (h *AdminHandlers) Status(w http.ResponseWriter, r *http.Request) {
 		}()
 	}
 
-	// ── Redis stats em paralelo ────────────────────────────────────
+	// ── Redis memory (sem DBSize: contava keys de outros apps) ──────
 	if h.Redis != nil {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if n, err := h.Redis.DBSize(ctx).Result(); err == nil {
-				mu.Lock()
-				resp.Cache.RedisKeys = n
-				mu.Unlock()
-			}
 			if info, err := h.Redis.Info(ctx, "memory").Result(); err == nil {
 				mu.Lock()
 				resp.Cache.RedisMemoryHuman = extractInfoLine(info, "used_memory_human:")
@@ -173,18 +190,41 @@ func (h *AdminHandlers) Status(w http.ResponseWriter, r *http.Request) {
 		}()
 	}
 
-	// ── Disposable ──────────────────────────────────────────────────
-	// In-memory (sem I/O): direto
+	// ── Disposable in-memory (sem I/O): direto ──────────────────────
 	if h.DispRegistry != nil {
 		resp.Disposable.InMemorySize = h.DispRegistry.Size()
 	}
-	if h.DispRepo != nil {
+
+	// ── Stuck jobs (running > 5min sem progresso) ───────────────────
+	if h.JobsRepo != nil {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if n, err := h.DispRepo.Count(ctx); err == nil {
+			if stuck, err := h.JobsRepo.ListStale(ctx, 5*time.Minute, 20); err == nil {
 				mu.Lock()
-				resp.Disposable.DBSize = n
+				resp.StuckJobs = stuck
+				mu.Unlock()
+			}
+		}()
+	}
+
+	// ── Throughput / contadores ao vivo ─────────────────────────────
+	if h.Pool != nil {
+		resp.Throughput.QueueLen = h.Pool.QueueLen()
+		resp.Throughput.QueueCap = h.Pool.QueueCap()
+		resp.Throughput.QueueUsage = h.Pool.QueueUsage()
+	}
+	if h.DNSResolver != nil && h.DNSResolver.Inflight != nil {
+		resp.Throughput.DNSLimit = h.DNSResolver.Inflight.Limit()
+		resp.Throughput.DNSInflight = h.DNSResolver.Inflight.Inflight()
+	}
+	if h.JobsRepo != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if n, err := h.JobsRepo.CountByStatus(ctx, "running"); err == nil {
+				mu.Lock()
+				resp.Throughput.JobsRunning = n
 				mu.Unlock()
 			}
 		}()

@@ -1,0 +1,22 @@
+// Polkit rule: permite ao user `mailclear` controlar suas próprias systemd
+// units sem precisar de sudo/senha.
+//
+// Cobre `systemctl restart/start/stop/reload mailclear-{api,worker}.service`
+// e a chamada D-Bus equivalente (`org.freedesktop.systemd1.manage-units`)
+// que o admin handler dispara em internal/server/handlers/admin_ops.go.
+//
+// Outras units (postgres, redis, unbound, etc) NÃO são afetadas — a regra
+// só responde com YES para o trio (user=mailclear, action=manage-units,
+// unit ∈ {mailclear-api, mailclear-worker}).
+//
+// Instalar em: /etc/polkit-1/rules.d/10-mailclear.rules
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.systemd1.manage-units" &&
+        subject.user == "mailclear") {
+        var unit = action.lookup("unit");
+        if (unit == "mailclear-api.service" ||
+            unit == "mailclear-worker.service") {
+            return polkit.Result.YES;
+        }
+    }
+});

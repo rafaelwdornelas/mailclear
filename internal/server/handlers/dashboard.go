@@ -48,15 +48,22 @@ h1 .v { color: #7d8590; font-size: 13px; font-weight: 400; margin-left: 8px; }
   font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
   color: #7d8590; margin-bottom: 12px; font-weight: 600;
 }
+.card.warn { border-color: #d29922; }
 .row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #21262d; }
 .row:last-child { border-bottom: 0; }
 .row .l { color: #7d8590; font-size: 13px; }
 .row .v { color: #f0f6fc; font-weight: 500; font-variant-numeric: tabular-nums; }
 
-.services { display: flex; gap: 8px; flex-wrap: wrap; }
-.svc { padding: 8px 14px; border-radius: 6px; font-size: 12px; font-weight: 600; }
+.bar { background: #0d1117; border-radius: 4px; height: 6px; overflow: hidden; margin-top: 4px; }
+.bar > span { display: block; height: 100%; background: #58a6ff; }
+.bar > span.high { background: #d29922; }
+.bar > span.critical { background: #f85149; }
+
+.header-services { display: flex; gap: 6px; flex-wrap: wrap; }
+.svc { padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 600; }
 .svc.ok { background: #14361e; color: #56d364; }
 .svc.fail { background: #5a1e25; color: #f85149; }
+header .right { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid #21262d; }
@@ -77,44 +84,57 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .btn:hover { background: #2d333b; }
 .btn.danger { color: #f85149; border-color: #5a1e25; }
 .btn.danger:hover { background: #5a1e25; color: #fff; }
-
-pre {
-  background: #0d1117; border: 1px solid #2d333b; border-radius: 6px;
-  padding: 10px; font-size: 12px; color: #d8dee9; overflow-x: auto;
-  position: relative; cursor: pointer;
-}
-pre:hover { border-color: #58a6ff; }
-pre::after {
-  content: "📋"; position: absolute; top: 6px; right: 8px;
-  opacity: 0.5; font-size: 11px;
-}
-pre.copied::after { content: "✓"; opacity: 1; color: #56d364; }
+.btn.warn { color: #d29922; border-color: #3b2e0c; }
+.btn.warn:hover { background: #3b2e0c; color: #fff; }
+.btn.small { padding: 4px 10px; font-size: 11px; }
 
 footer {
   text-align: center; color: #6e7681; font-size: 12px; margin-top: 24px;
   padding-top: 16px; border-top: 1px solid #2d333b;
 }
-.spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid #2d333b;
-  border-top-color: #58a6ff; border-radius: 50%; animation: spin 0.8s linear infinite; }
-@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Modal de logs */
+.modal-bg {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.75); z-index: 100;
+  display: none; align-items: center; justify-content: center;
+}
+.modal-bg.open { display: flex; }
+.modal {
+  background: #0d1117; border: 1px solid #2d333b; border-radius: 8px;
+  width: 92%; max-width: 1100px; height: 80vh; display: flex; flex-direction: column;
+}
+.modal-head {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 12px 16px; border-bottom: 1px solid #2d333b;
+}
+.modal-head h3 { font-size: 14px; color: #f0f6fc; }
+.modal-head .x { cursor: pointer; color: #7d8590; font-size: 18px; padding: 0 8px; }
+.modal-head .x:hover { color: #f85149; }
+.modal-body {
+  flex: 1; overflow: auto; padding: 12px 16px; background: #010409;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11px; color: #c9d1d9; white-space: pre-wrap; word-break: break-all;
+}
+
+#flash { position: fixed; bottom: 20px; right: 20px; padding: 10px 16px;
+  background: #161b22; border: 1px solid #2d333b; border-radius: 6px;
+  font-size: 13px; color: #f0f6fc; display: none; z-index: 200; max-width: 400px; }
+#flash.ok { border-color: #14361e; }
+#flash.err { border-color: #5a1e25; }
 </style>
 </head>
 <body>
 <div class="wrap">
   <header>
     <h1>MailClear <span class="v" id="version">—</span></h1>
-    <div>
+    <div class="right">
+      <div class="header-services" id="services">—</div>
       <span id="overall" class="tag ok">conectando…</span>
-      <span style="color:#7d8590;font-size:12px;margin-left:12px" id="updated">—</span>
+      <span style="color:#7d8590;font-size:12px" id="updated">—</span>
     </div>
   </header>
 
   <div class="grid">
-    <div class="card">
-      <h2>Serviços</h2>
-      <div class="services" id="services">—</div>
-    </div>
-
     <div class="card">
       <h2>Runtime</h2>
       <div class="row"><span class="l">Uptime</span><span class="v" id="uptime">—</span></div>
@@ -125,10 +145,20 @@ footer {
 
     <div class="card">
       <h2>Cache</h2>
-      <div class="row"><span class="l">Chaves Redis</span><span class="v" id="redis-keys">—</span></div>
       <div class="row"><span class="l">Memória Redis</span><span class="v" id="redis-mem">—</span></div>
-      <div class="row"><span class="l">Disposable mem</span><span class="v" id="disp-mem">—</span></div>
-      <div class="row"><span class="l">Disposable DB</span><span class="v" id="disp-db">—</span></div>
+      <div class="row"><span class="l">Disposable em memória</span><span class="v" id="disp-mem">—</span></div>
+    </div>
+
+    <div class="card">
+      <h2>Throughput</h2>
+      <div class="row">
+        <span class="l">Fila de batches</span>
+        <span class="v" id="queue">—</span>
+      </div>
+      <div class="bar"><span id="queue-bar" style="width:0%"></span></div>
+      <div class="row"><span class="l">DNS in-flight</span><span class="v" id="dns-inflight">—</span></div>
+      <div class="row"><span class="l">DNS limite (AIMD)</span><span class="v" id="dns-limit">—</span></div>
+      <div class="row"><span class="l">Jobs em execução</span><span class="v" id="jobs-running">—</span></div>
     </div>
 
     <div class="card">
@@ -138,17 +168,26 @@ footer {
       <div class="row"><span class="l">Risky</span><span class="v" id="s-risky" style="color:#d29922">—</span></div>
       <div class="row"><span class="l">Inválidos</span><span class="v" id="s-invalid" style="color:#f85149">—</span></div>
       <div class="row"><span class="l">Disposable</span><span class="v" id="s-disposable" style="color:#a371f7">—</span></div>
-      <div class="row"><span class="l">Domínios únicos</span><span class="v" id="s-domains">—</span></div>
     </div>
+  </div>
+
+  <div class="card warn" id="stuck-card" style="margin-bottom:24px;display:none">
+    <h2 style="color:#d29922">⚠ Jobs travados (running > 5min sem progresso)</h2>
+    <table>
+      <thead>
+        <tr><th>Nome</th><th class="num">Progresso</th><th>Última atualização</th><th></th></tr>
+      </thead>
+      <tbody id="stuck"></tbody>
+    </table>
   </div>
 
   <div class="card" style="margin-bottom:24px">
     <h2>Jobs recentes</h2>
     <table>
       <thead>
-        <tr><th>Status</th><th>Nome</th><th class="num">Progresso</th><th class="num">✓</th><th class="num">⚠</th><th class="num">✗</th><th class="num">♻</th><th>Criado</th></tr>
+        <tr><th>Status</th><th>Nome</th><th class="num">Progresso</th><th class="num">✓</th><th class="num">⚠</th><th class="num">✗</th><th class="num">♻</th><th>Criado</th><th></th></tr>
       </thead>
-      <tbody id="jobs"><tr><td colspan="8" style="color:#7d8590">carregando…</td></tr></tbody>
+      <tbody id="jobs"><tr><td colspan="9" style="color:#7d8590">carregando…</td></tr></tbody>
     </table>
   </div>
 
@@ -160,27 +199,19 @@ footer {
         <button class="btn" onclick="doAction('/admin/disposable/reload', 'POST')">Recarregar disposable</button>
         <button class="btn danger" onclick="confirmAction('Cancelar TODOS os jobs em execução?', '/admin/jobs/cancel-all', 'POST')">Cancelar todos jobs</button>
       </div>
+    </div>
+
+    <div class="card">
+      <h2>Operação dos serviços</h2>
+      <div class="actions">
+        <button class="btn" onclick="openLogs('api')">Ver logs API</button>
+        <button class="btn" onclick="openLogs('worker')">Ver logs Worker</button>
+        <button class="btn warn" onclick="confirmAction('Reiniciar mailclear-api? Vai derrubar o servidor por alguns segundos.', '/admin/services/restart?service=api', 'POST')">Reiniciar API</button>
+        <button class="btn warn" onclick="confirmAction('Reiniciar mailclear-worker?', '/admin/services/restart?service=worker', 'POST')">Reiniciar Worker</button>
+      </div>
       <p style="color:#7d8590;font-size:12px;margin-top:12px">
-        Ações executam diretamente — API sem autenticação.
+        Restart usa polkit (sem sudo) — ver deploy/polkit/10-mailclear.rules.
       </p>
-    </div>
-
-    <div class="card">
-      <h2>Limpar logs (requer sudo no terminal)</h2>
-      <pre onclick="copyPre(this)">sudo journalctl --vacuum-time=7d</pre>
-      <pre onclick="copyPre(this)">sudo journalctl --vacuum-size=500M</pre>
-      <pre onclick="copyPre(this)">sudo journalctl --rotate &amp;&amp; sudo journalctl --vacuum-time=1s</pre>
-      <p style="color:#7d8590;font-size:12px;margin-top:8px">
-        Clique no comando para copiar.
-      </p>
-    </div>
-
-    <div class="card">
-      <h2>Operação (terminal)</h2>
-      <pre onclick="copyPre(this)">sudo systemctl restart mailclear-api mailclear-worker</pre>
-      <pre onclick="copyPre(this)">sudo journalctl -u mailclear-api -f</pre>
-      <pre onclick="copyPre(this)">sudo unbound-control stats_noreset | grep cache</pre>
-      <pre onclick="copyPre(this)">redis-cli --scan --pattern "mailclear:*" | head -20</pre>
     </div>
 
     <div class="card">
@@ -198,132 +229,176 @@ footer {
   </footer>
 </div>
 
+<!-- Modal de logs -->
+<div class="modal-bg" id="log-modal-bg">
+  <div class="modal">
+    <div class="modal-head">
+      <h3 id="log-title">Logs</h3>
+      <span class="x" onclick="closeLogs()">✕</span>
+    </div>
+    <div class="modal-body" id="log-body">carregando…</div>
+  </div>
+</div>
+
+<div id="flash"></div>
+
 <script>
 const $ = (id) => document.getElementById(id);
+let logStream = null;
 
-function flash(msg) {
-  const el = $('updated');
-  const old = el.textContent;
+function flash(msg, kind) {
+  const el = $('flash');
   el.textContent = msg;
-  setTimeout(() => { el.textContent = old; }, 1500);
+  el.className = kind || '';
+  el.style.display = 'block';
+  setTimeout(() => { el.style.display = 'none'; }, 2500);
 }
 
-function fmtNumber(n) {
-  if (n == null) return '—';
-  return n.toLocaleString('pt-BR');
-}
-
+function fmtNumber(n) { return n == null ? '—' : n.toLocaleString('pt-BR'); }
 function fmtUptime(s) {
   if (!s) return '—';
-  const d = Math.floor(s / 86400);
-  const h = Math.floor((s % 86400) / 3600);
-  const m = Math.floor((s % 3600) / 60);
+  const d = Math.floor(s/86400), h = Math.floor((s%86400)/3600), m = Math.floor((s%3600)/60);
   if (d > 0) return d + 'd ' + h + 'h';
   if (h > 0) return h + 'h ' + m + 'm';
   return m + 'm';
 }
-
-function fmtTime(iso) {
-  if (!iso) return '—';
-  try { return new Date(iso).toLocaleString('pt-BR'); } catch (e) { return iso; }
-}
-
-function copyPre(el) {
-  navigator.clipboard.writeText(el.textContent).then(() => {
-    el.classList.add('copied');
-    setTimeout(() => el.classList.remove('copied'), 1200);
-  });
-}
+function fmtTime(iso) { if (!iso) return '—'; try { return new Date(iso).toLocaleString('pt-BR'); } catch (e) { return iso; } }
+function fmtPercent(f) { if (f == null) return '—'; return Math.round(f * 100) + '%'; }
 
 async function doAction(path, method) {
   try {
     const r = await fetch(path, { method });
     const txt = await r.text();
-    if (r.ok) { flash('OK: ' + txt.substring(0, 80)); refresh(); }
-    else { flash('Erro ' + r.status + ': ' + txt); }
-  } catch (e) {
-    flash('Falha: ' + e.message);
-  }
+    if (r.ok) { flash('OK: ' + txt.substring(0, 100), 'ok'); refresh(); }
+    else { flash('Erro ' + r.status + ': ' + txt.substring(0, 200), 'err'); }
+  } catch (e) { flash('Falha: ' + e.message, 'err'); }
 }
 
-function confirmAction(msg, path, method) {
-  if (confirm(msg)) doAction(path, method);
+function confirmAction(msg, path, method) { if (confirm(msg)) doAction(path, method); }
+
+async function forceFail(id, name) {
+  if (!confirm('Marcar job "' + name + '" como failed?')) return;
+  await doAction('/admin/jobs/' + id + '/force-fail', 'POST');
 }
+
+async function requeue(id, name) {
+  if (!confirm('Re-enfileirar job "' + name + '"? Vai criar um job novo com os mesmos emails.')) return;
+  await doAction('/api/v1/jobs/' + id + '/requeue', 'POST');
+}
+
+function openLogs(service) {
+  $('log-title').textContent = 'Logs · mailclear-' + service;
+  $('log-body').textContent = 'conectando…';
+  $('log-modal-bg').classList.add('open');
+  closeLogStream();
+  // Stream via SSE
+  logStream = new EventSource('/admin/logs/stream?service=' + service);
+  let buf = '';
+  logStream.onmessage = (ev) => {
+    buf += ev.data + '\n';
+    if (buf.length > 200000) buf = buf.substring(buf.length - 150000);
+    $('log-body').textContent = buf;
+    $('log-body').scrollTop = $('log-body').scrollHeight;
+  };
+  logStream.onerror = () => { $('log-body').textContent = buf + '\n[stream encerrado]'; closeLogStream(); };
+}
+function closeLogs() { $('log-modal-bg').classList.remove('open'); closeLogStream(); }
+function closeLogStream() { if (logStream) { logStream.close(); logStream = null; } }
 
 async function refresh() {
   try {
     const r = await fetch('/admin/status');
-    if (!r.ok) {
-      $('overall').textContent = 'erro ' + r.status;
-      $('overall').className = 'tag fail';
-      return;
-    }
+    if (!r.ok) { $('overall').textContent = 'erro ' + r.status; $('overall').className = 'tag fail'; return; }
     const d = await r.json();
     render(d);
-  } catch (e) {
-    $('overall').textContent = 'offline';
-    $('overall').className = 'tag fail';
-  }
+  } catch (e) { $('overall').textContent = 'offline'; $('overall').className = 'tag fail'; }
 }
 
 function render(d) {
-  // Header
   $('version').textContent = 'v' + (d.version || 'dev');
   $('updated').textContent = 'atualizado ' + new Date().toLocaleTimeString('pt-BR');
 
-  // Overall status
   const allOk = Object.values(d.services || {}).every(v => v === 'ok');
   $('overall').textContent = allOk ? '✓ tudo ok' : '✗ degradado';
   $('overall').className = 'tag ' + (allOk ? 'ok' : 'fail');
 
-  // Services
   $('services').innerHTML = Object.entries(d.services || {})
-    .map(([k, v]) => '<span class="svc ' + v + '">' + k + ' ' + (v === 'ok' ? '✓' : '✗') + '</span>')
-    .join('');
+    .map(([k, v]) => '<span class="svc ' + v + '">' + k + ' ' + (v === 'ok' ? '✓' : '✗') + '</span>').join('');
 
-  // Runtime
   $('uptime').textContent = fmtUptime(d.uptime_seconds);
   $('goroutines').textContent = fmtNumber(d.runtime?.goroutines);
   $('mem').textContent = (d.runtime?.mem_alloc_mb || 0) + ' MB / ' + (d.runtime?.mem_sys_mb || 0) + ' MB';
   $('goversion').textContent = d.runtime?.go_version || '—';
 
-  // Cache
-  $('redis-keys').textContent = fmtNumber(d.cache?.redis_keys);
   $('redis-mem').textContent = d.cache?.redis_memory_human || '—';
   $('disp-mem').textContent = fmtNumber(d.disposable?.in_memory_size);
-  $('disp-db').textContent = fmtNumber(d.disposable?.db_size);
 
-  // Stats
+  // Throughput
+  const t = d.throughput || {};
+  const usage = t.queue_usage || 0;
+  $('queue').textContent = fmtNumber(t.queue_len) + ' / ' + fmtNumber(t.queue_cap) + ' (' + fmtPercent(usage) + ')';
+  const bar = $('queue-bar');
+  bar.style.width = Math.min(100, usage * 100) + '%';
+  bar.className = usage >= 0.9 ? 'critical' : (usage >= 0.6 ? 'high' : '');
+  $('dns-inflight').textContent = fmtNumber(t.dns_inflight);
+  $('dns-limit').textContent = fmtNumber(t.dns_limit);
+  $('jobs-running').textContent = fmtNumber(t.jobs_running);
+
   const s = d.stats || {};
   $('total').textContent = fmtNumber(s.total);
   $('s-valid').textContent = fmtNumber(s.valid);
   $('s-risky').textContent = fmtNumber(s.risky);
   $('s-invalid').textContent = fmtNumber(s.invalid);
   $('s-disposable').textContent = fmtNumber(s.disposable);
-  $('s-domains').textContent = fmtNumber(s.unique_domains);
 
-  // Jobs
+  // Stuck jobs
+  const stuck = d.stuck_jobs || [];
+  if (stuck.length === 0) {
+    $('stuck-card').style.display = 'none';
+  } else {
+    $('stuck-card').style.display = 'block';
+    $('stuck').innerHTML = stuck.map(j => {
+      const pct = j.total > 0 ? Math.floor(100 * j.processed / j.total) : 0;
+      return '<tr>' +
+        '<td>' + escapeHtml(j.name || '—') + '</td>' +
+        '<td class="num">' + fmtNumber(j.processed) + ' / ' + fmtNumber(j.total) + ' (' + pct + '%)</td>' +
+        '<td style="color:#7d8590">' + fmtTime(j.updated_at) + '</td>' +
+        '<td><button class="btn small warn" onclick="forceFail(\'' + j.id + '\', \'' + escapeAttr(j.name) + '\')">Marcar failed</button></td>' +
+        '</tr>';
+    }).join('');
+  }
+
+  // Recent jobs
   const jobs = d.jobs || [];
   if (jobs.length === 0) {
-    $('jobs').innerHTML = '<tr><td colspan="8" style="color:#7d8590">nenhum job ainda</td></tr>';
+    $('jobs').innerHTML = '<tr><td colspan="9" style="color:#7d8590">nenhum job ainda</td></tr>';
   } else {
     $('jobs').innerHTML = jobs.map(j => {
       const pct = j.total > 0 ? Math.floor(100 * j.processed / j.total) : 0;
+      const actionBtn = j.status === 'failed'
+        ? '<button class="btn small" onclick="requeue(\'' + j.id + '\', \'' + escapeAttr(j.name) + '\')">Re-enfileirar</button>'
+        : '';
       return '<tr>' +
         '<td><span class="badge ' + j.status + '">' + j.status + '</span></td>' +
-        '<td style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + (j.name || '') + '">' + (j.name || '—') + '</td>' +
+        '<td style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + escapeAttr(j.name || '') + '">' + escapeHtml(j.name || '—') + '</td>' +
         '<td class="num">' + fmtNumber(j.processed) + ' / ' + fmtNumber(j.total) + ' (' + pct + '%)</td>' +
         '<td class="num" style="color:#56d364">' + fmtNumber(j.valid) + '</td>' +
         '<td class="num" style="color:#d29922">' + fmtNumber(j.risky) + '</td>' +
         '<td class="num" style="color:#f85149">' + fmtNumber(j.invalid) + '</td>' +
         '<td class="num" style="color:#a371f7">' + fmtNumber(j.disposable) + '</td>' +
         '<td style="color:#7d8590">' + fmtTime(j.created_at) + '</td>' +
+        '<td>' + actionBtn + '</td>' +
         '</tr>';
     }).join('');
   }
 }
 
-// Boot
+function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]); }
+function escapeAttr(s) { return String(s).replace(/['"\\]/g, '\\$&'); }
+
+// ESC fecha o modal
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeLogs(); });
+
 refresh();
 setInterval(refresh, 5000);
 </script>

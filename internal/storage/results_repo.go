@@ -3,6 +3,8 @@ package storage
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -39,18 +41,30 @@ func NewResultsRepo(pool *pgxpool.Pool) *ResultsRepo {
 	return &ResultsRepo{pool: pool}
 }
 
-// BulkInsert insere um batch de resultados usando pgx.CopyFrom (COPY) para
-// máxima velocidade. Conflitos (job_id+email_normalized) são silenciosamente
-// descartados via INSERT em lote secundário se algum colidir.
-func (r *ResultsRepo) BulkInsert(ctx context.Context, items []*EmailResult) error {
-	if len(items) == 0 {
-		return nil
-	}
+// emailCols é a ordem canônica de colunas para BulkInsert / staging.
+var emailCols = []string{
+	"job_id", "email_original", "email_normalized", "local_part", "domain",
+	"status", "classification", "score", "reasons", "suggested_email",
+	"is_disposable", "is_role", "has_mx",
+}
 
-	cols := []string{
-		"job_id", "email_original", "email_normalized", "local_part", "domain",
-		"status", "classification", "score", "reasons", "suggested_email",
-		"is_disposable", "is_role", "has_mx",
+// BulkInsert insere um batch de resultados ignorando conflitos no índice único
+// (job_id, email_normalized). Usa staging-table + COPY + INSERT ... ON CONFLICT
+// DO NOTHING dentro de uma transação:
+//
+//  1. Cria TEMP TABLE _staging_emails ON COMMIT DROP (sem constraints).
+//  2. COPY do batch direto na staging — rápido.
+//  3. INSERT INTO emails SELECT DISTINCT ON ... ON CONFLICT DO NOTHING.
+//
+// O DISTINCT ON resolve duplicatas DENTRO do batch (mesmo email_normalized
+// aparecendo 2x), ON CONFLICT resolve duplicatas com batches anteriores
+// (validator.Normalize pode colapsar emails que o importer.Dedup não pegou,
+// e.g. john.doe@gmail.com ↔ johndoe@gmail.com).
+//
+// Devolve quantas linhas foram efetivamente persistidas (0 ≤ inserted ≤ len(items)).
+func (r *ResultsRepo) BulkInsert(ctx context.Context, items []*EmailResult) (int64, error) {
+	if len(items) == 0 {
+		return 0, nil
 	}
 
 	rows := make([][]any, 0, len(items))
@@ -66,12 +80,57 @@ func (r *ResultsRepo) BulkInsert(ctx context.Context, items []*EmailResult) erro
 		})
 	}
 
-	_, err := r.pool.CopyFrom(ctx,
-		pgx.Identifier{"emails"},
-		cols,
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Staging table sem constraints — qualquer dedup acontece no INSERT abaixo.
+	// ON COMMIT DROP garante que somem ao fim da transação (ou no rollback).
+	if _, err := tx.Exec(ctx, `
+		CREATE TEMP TABLE _staging_emails (
+			job_id           uuid                NOT NULL,
+			email_original   text                NOT NULL,
+			email_normalized citext              NOT NULL,
+			local_part       text                NOT NULL,
+			domain           citext              NOT NULL,
+			status           email_status        NOT NULL,
+			classification   email_classification NOT NULL,
+			score            smallint            NOT NULL,
+			reasons          jsonb               NOT NULL,
+			suggested_email  text,
+			is_disposable    bool                NOT NULL,
+			is_role          bool                NOT NULL,
+			has_mx           bool                NOT NULL
+		) ON COMMIT DROP
+	`); err != nil {
+		return 0, fmt.Errorf("create staging: %w", err)
+	}
+
+	if _, err := tx.CopyFrom(ctx,
+		pgx.Identifier{"_staging_emails"},
+		emailCols,
 		pgx.CopyFromRows(rows),
-	)
-	return err
+	); err != nil {
+		return 0, fmt.Errorf("copy staging: %w", err)
+	}
+
+	colList := strings.Join(emailCols, ", ")
+	tag, err := tx.Exec(ctx, fmt.Sprintf(`
+		INSERT INTO emails (%s)
+		SELECT DISTINCT ON (job_id, email_normalized) %s
+		FROM _staging_emails
+		ON CONFLICT (job_id, email_normalized) DO NOTHING
+	`, colList, colList))
+	if err != nil {
+		return 0, fmt.Errorf("insert from staging: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("commit: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 // ListByJob devolve emails de um job em ordem crescente de id, com cursor (afterID).
@@ -145,28 +204,19 @@ func (r *ResultsRepo) CountByStatus(ctx context.Context, jobID uuid.UUID) (map[s
 
 // GlobalStats agrega estatísticas globais.
 type GlobalStats struct {
-	Total           int64 `json:"total"`
-	Valid           int64 `json:"valid"`
-	Invalid         int64 `json:"invalid"`
-	Risky           int64 `json:"risky"`
-	Disposable      int64 `json:"disposable"`
-	Unknown         int64 `json:"unknown"`
-	UniqueDomains   int64 `json:"unique_domains"`
+	Total      int64 `json:"total"`
+	Valid      int64 `json:"valid"`
+	Invalid    int64 `json:"invalid"`
+	Risky      int64 `json:"risky"`
+	Disposable int64 `json:"disposable"`
+	Unknown    int64 `json:"unknown"`
 }
 
-// Global devolve estatísticas globais agregadas.
+// Global devolve estatísticas globais agregadas a partir da tabela `jobs`,
+// que é pequena (dezenas a centenas de linhas) — varrer `emails` (potencialmente
+// bilhões) com COUNT FILTER levava 20+ segundos a 10M linhas.
 //
-// IMPORTANTE: agrega da tabela `jobs` (pequena, dezenas a centenas de linhas)
-// e não de `emails` (potencialmente bilhões). A antiga implementação fazia
-// count(*) FILTER em emails levava 20+ segundos com 10M linhas.
-//
-// Os contadores em jobs (processed, valid, invalid, risky, disposable, unknown)
-// são atualizados a cada batch via JobsRepo.IncrementProgress, então a soma
-// reflete o estado real de tudo que já foi processado.
-//
-// UniqueDomains é caro de calcular (count DISTINCT em emails) — devolve 0
-// se a opção de count distinto não estiver habilitada. Quem precisar tem
-// o endpoint dedicado em GlobalWithDomains.
+// Os contadores em jobs são atualizados a cada batch via IncrementProgress.
 func (r *ResultsRepo) Global(ctx context.Context) (*GlobalStats, error) {
 	var s GlobalStats
 	err := r.pool.QueryRow(ctx, `
@@ -182,7 +232,27 @@ func (r *ResultsRepo) Global(ctx context.Context) (*GlobalStats, error) {
 	if err != nil {
 		return nil, err
 	}
-	// UniqueDomains não está disponível via jobs — fica em 0.
-	// Quem precisa pode usar endpoint separado que faz a query cara.
 	return &s, nil
+}
+
+// ListOriginalsByJob devolve a lista de email_original de um job, paginada
+// por cursor de id. Usado por requeue para re-submeter o mesmo conjunto.
+func (r *ResultsRepo) ListOriginalsByJob(ctx context.Context, jobID uuid.UUID) ([]string, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT email_original FROM emails WHERE job_id = $1 ORDER BY id ASC
+	`, jobID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]string, 0, 1024)
+	for rows.Next() {
+		var e string
+		if err := rows.Scan(&e); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
 }

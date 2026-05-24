@@ -43,9 +43,20 @@ func NewAdaptiveSemaphore(initial, absoluteMax int) *AdaptiveSemaphore {
 }
 
 // Acquire pega 1 slot. Bloqueia se inflight >= limit. Respeita ctx.
+//
+// Fast path: se há slot livre na primeira checada, retorna sem spawnar
+// goroutine watcher. Caso contrário entra no slow path, que precisa do
+// watcher para destravar o sync.Cond.Wait quando ctx cancelar.
 func (s *AdaptiveSemaphore) Acquire(ctx context.Context) error {
-	// Goroutine watcher: se ctx cancelar enquanto esperamos, broadcast
-	// pra liberar o Wait. Cleanup garantido via canal `done`.
+	s.mu.Lock()
+	if s.inflight < s.limit {
+		s.inflight++
+		s.acquiredTotal.Add(1)
+		s.mu.Unlock()
+		return nil
+	}
+
+	// Slow path: vamos esperar. Spawn watcher só agora.
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
@@ -58,7 +69,6 @@ func (s *AdaptiveSemaphore) Acquire(ctx context.Context) error {
 		}
 	}()
 
-	s.mu.Lock()
 	defer s.mu.Unlock()
 	for s.inflight >= s.limit {
 		if err := ctx.Err(); err != nil {

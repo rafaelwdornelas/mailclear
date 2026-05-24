@@ -5,6 +5,9 @@ package app
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -177,14 +180,17 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 		Redis:          rdb,
 		DNSServer:      cfg.DNS.Server,
 		DNSCache:       dnsCache,
+		DNSResolver:    resolver,
 		DispRegistry:   dispReg,
 		DispRepo:       dispRepo,
 		JobsRepo:       jobsRepo,
 		ResultsRepo:    resultsRepo,
+		Pool:           pool,
 		RedisKeyPrefix: cfg.Redis.KeyPrefix,
 		Version:        "1.0",
 		StartedAt:      time.Now(),
 	}
+	adminOpsH := handlers.NewAdminOps(jobsRepo, detectSelfUnit())
 	dashH := handlers.NewDashboard()
 
 	routes := &server.Routes{
@@ -196,6 +202,7 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 		Import:    importH,
 		Stats:     statsH,
 		Admin:     adminH,
+		AdminOps:  adminOpsH,
 		Dashboard: dashH,
 	}
 	srv := server.New(cfg.HTTP, routes.Build(), log)
@@ -250,4 +257,19 @@ func (a *App) Shutdown() {
 		a.DB.Close()
 	}
 	a.Log.Info().Msg("shutdown concluído")
+}
+
+
+// detectSelfUnit deduz a systemd unit do processo atual pelo nome do binário.
+// Permite o handler de restart tratar self-restart de forma especial (responder
+// antes do shutdown derrubar a conexão). Retorna "" se não conseguir detectar.
+func detectSelfUnit() string {
+	base := filepath.Base(os.Args[0])
+	switch {
+	case strings.Contains(base, "mailclear-api"):
+		return "mailclear-api.service"
+	case strings.Contains(base, "mailclear-worker"):
+		return "mailclear-worker.service"
+	}
+	return ""
 }

@@ -35,13 +35,26 @@ func (v *DefaultValidator) Validate(ctx context.Context, raw string) (*Email, er
 
 // ValidateBatch processa um lote em sequência.
 // Para concorrência real, usar internal/workers.Pool com este validator.
+//
+// Erros de ctx (cancel/deadline) abortam o batch imediatamente. Erros de
+// um email específico ficam refletidos no próprio *Email (Status=unknown
+// + AddReason("validation_error", ...)).
 func (v *DefaultValidator) ValidateBatch(ctx context.Context, raws []string) ([]*Email, error) {
 	out := make([]*Email, 0, len(raws))
 	for _, r := range raws {
 		if err := ctx.Err(); err != nil {
 			return out, err
 		}
-		e, _ := v.Validate(ctx, r)
+		e, err := v.Validate(ctx, r)
+		if err != nil {
+			if ctx.Err() != nil {
+				return out, err
+			}
+			if e != nil {
+				e.Status = StatusUnknown
+				e.AddReason("validation_error", err.Error())
+			}
+		}
 		out = append(out, e)
 	}
 	return out, nil

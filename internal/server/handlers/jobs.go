@@ -64,6 +64,28 @@ func (h *JobsHandlers) Cancel(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
 }
 
+// Requeue cria um job novo com os mesmos emails do job indicado.
+// Útil para reprocessar jobs que terminaram em failed.
+//   POST /api/v1/jobs/{id}/requeue
+func (h *JobsHandlers) Requeue(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		WriteError(w, http.StatusBadRequest, "BAD_ID", "ID inválido")
+		return
+	}
+	job, err := h.mgr.Requeue(r.Context(), id)
+	if err != nil {
+		WriteError(w, http.StatusUnprocessableEntity, "REQUEUE_ERROR", err.Error())
+		return
+	}
+	WriteJSON(w, http.StatusAccepted, map[string]any{
+		"job_id":        job.ID,
+		"status":        "queued",
+		"total":         job.Total,
+		"requeued_from": id,
+	})
+}
+
 // Results devolve resultados paginados (cursor por id).
 func (h *JobsHandlers) Results(w http.ResponseWriter, r *http.Request) {
 	id, err := uuid.Parse(chi.URLParam(r, "id"))

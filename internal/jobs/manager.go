@@ -153,3 +153,43 @@ func (m *Manager) CountByStatus(ctx context.Context, jobID uuid.UUID) (map[strin
 func (m *Manager) MarkCompleted(ctx context.Context, id uuid.UUID) error {
 	return m.jobs.UpdateStatus(ctx, id, "completed")
 }
+
+// Requeue cria um job novo com os mesmos emails do job `srcID` e o submete
+// para processamento. O job original não é alterado — fica como referência.
+//
+// O novo job tem:
+//   - nome do job original + " (requeue)"
+//   - metadata.requeued_from = <id original>
+//   - total = quantidade de emails únicos buscados de `emails.email_original`
+//
+// Note que duplicatas no `email_normalized` são silenciosamente filtradas
+// pelo BulkInsert via ON CONFLICT DO NOTHING (efeito do fix do A1).
+func (m *Manager) Requeue(ctx context.Context, srcID uuid.UUID) (*storage.Job, error) {
+	src, err := m.jobs.Get(ctx, srcID)
+	if err != nil {
+		return nil, fmt.Errorf("job origem: %w", err)
+	}
+
+	emails, err := m.results.ListOriginalsByJob(ctx, srcID)
+	if err != nil {
+		return nil, fmt.Errorf("listar emails: %w", err)
+	}
+	if len(emails) == 0 {
+		return nil, fmt.Errorf("job %s não tem emails para re-enfileirar", srcID)
+	}
+
+	metaRaw, _ := json.Marshal(map[string]any{
+		"requeued_from": srcID.String(),
+		"source_name":   src.Name,
+	})
+
+	job, err := m.jobs.Create(ctx, src.Name+" (requeue)", "requeue", int64(len(emails)), metaRaw)
+	if err != nil {
+		return nil, fmt.Errorf("criar job: %w", err)
+	}
+
+	if err := m.Submit(ctx, job.ID, emails); err != nil {
+		return nil, fmt.Errorf("submit: %w", err)
+	}
+	return job, nil
+}

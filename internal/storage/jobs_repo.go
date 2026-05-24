@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -138,6 +139,30 @@ func (r *JobsRepo) Cancel(ctx context.Context, id uuid.UUID) error {
 	return err
 }
 
+// CountByStatus devolve quantos jobs estão em um determinado status.
+func (r *JobsRepo) CountByStatus(ctx context.Context, status string) (int64, error) {
+	var n int64
+	err := r.pool.QueryRow(ctx, `SELECT count(*) FROM jobs WHERE status = $1::job_status`, status).Scan(&n)
+	return n, err
+}
+
+// SetLastError grava em metadata o último erro que travou o job. Não muda status.
+// Padrão: metadata.last_error = { phase, message, at }
+func (r *JobsRepo) SetLastError(ctx context.Context, id uuid.UUID, phase, message string) error {
+	payload := map[string]any{
+		"phase":   phase,
+		"message": message,
+		"at":      time.Now().UTC().Format(time.RFC3339),
+	}
+	b, _ := json.Marshal(payload)
+	_, err := r.pool.Exec(ctx, `
+		UPDATE jobs
+		SET metadata = jsonb_set(coalesce(metadata, '{}'::jsonb), '{last_error}', $2::jsonb, true)
+		WHERE id = $1
+	`, id, b)
+	return err
+}
+
 // MarkStaleAsFailed marca jobs em running/pending sem atualização há mais
 // que `staleAfter` como failed. Usado no boot da aplicação para limpar
 // jobs órfãos que ficaram travados em runs anteriores que crasharam ou
@@ -156,6 +181,61 @@ func (r *JobsRepo) MarkStaleAsFailed(ctx context.Context, staleAfter time.Durati
 		return 0, err
 	}
 	return tag.RowsAffected(), nil
+}
+
+// ListStale devolve jobs em running/pending sem atualização há mais que `staleAfter`.
+// Diferente de MarkStaleAsFailed, não altera nada — só lista para a UI exibir.
+func (r *JobsRepo) ListStale(ctx context.Context, staleAfter time.Duration, limit int32) ([]*Job, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, name, status, source, total, processed, valid, invalid, risky, unknown, disposable,
+		       created_at, updated_at, started_at, finished_at, metadata
+		FROM jobs
+		WHERE status IN ('pending', 'running')
+		  AND updated_at < now() - $1::interval
+		ORDER BY updated_at ASC
+		LIMIT $2
+	`, staleAfter.String(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []*Job
+	for rows.Next() {
+		j, err := scanJob(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, j)
+	}
+	return out, rows.Err()
+}
+
+// ForceFail marca um job como failed independente do status atual e grava
+// motivo manual em metadata. Usado para destravar jobs que ficaram em
+// running sem progresso há muito tempo.
+func (r *JobsRepo) ForceFail(ctx context.Context, id uuid.UUID, reason string) error {
+	payload := map[string]any{
+		"phase":   "force_fail",
+		"message": reason,
+		"at":      time.Now().UTC().Format(time.RFC3339),
+	}
+	b, _ := json.Marshal(payload)
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE jobs
+		SET status      = 'failed',
+		    finished_at = now(),
+		    metadata    = jsonb_set(coalesce(metadata, '{}'::jsonb), '{last_error}', $2::jsonb, true)
+		WHERE id = $1
+		  AND status IN ('pending', 'running', 'paused')
+	`, id, b)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("job %s não está em estado destravável", id)
+	}
+	return nil
 }
 
 // rowScanner permite reaproveitar a função de scan para QueryRow e Rows.

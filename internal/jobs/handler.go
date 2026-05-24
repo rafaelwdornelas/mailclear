@@ -3,10 +3,13 @@ package jobs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/rs/zerolog/log"
 	"golang.org/x/sync/errgroup"
 
 	mdns "github.com/rafaelwdornelas/mailclear/internal/dns"
@@ -92,12 +95,26 @@ func MakeTaskHandler(
 		for i, raw := range t.Emails {
 			i, raw := i, raw
 			g.Go(func() error {
-				e, _ := val.Validate(gctx, raw)
+				e, err := val.Validate(gctx, raw)
+				if err != nil {
+					// ctx cancelado/timeout: aborta o batch inteiro pra evitar
+					// persistência parcial. Outros erros são tratados no email
+					// (Validate sempre retorna *Email não-nil).
+					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+						return err
+					}
+					if e != nil {
+						e.Status = validation.StatusUnknown
+						e.AddReason("validation_error", err.Error())
+					}
+				}
 				emails[i] = e
 				return nil
 			})
 		}
-		_ = g.Wait()
+		if err := g.Wait(); err != nil {
+			return err
+		}
 		if jobsMet != nil {
 			jobsMet.PhaseDuration.WithLabelValues("validate").
 				Observe(time.Since(phaseStart).Seconds())
@@ -151,10 +168,12 @@ func MakeTaskHandler(
 			}
 		}
 
-		if err := results.BulkInsert(ctx, records); err != nil {
+		if _, err := results.BulkInsert(ctx, records); err != nil {
+			markJobFailed(jobsRepo, t.JobID, "bulk_insert", err)
 			return err
 		}
 		if err := jobsRepo.IncrementProgress(ctx, t.JobID, delta); err != nil {
+			markJobFailed(jobsRepo, t.JobID, "increment_progress", err)
 			return err
 		}
 		if jobsMet != nil {
@@ -162,6 +181,21 @@ func MakeTaskHandler(
 				Observe(time.Since(phaseStart).Seconds())
 		}
 		return nil
+	}
+}
+
+// markJobFailed transiciona o job para `failed` e grava o motivo em metadata.
+// Usa context.Background() porque o ctx do batch pode estar cancelado.
+// Timeout curto (5s) garante que não trave o worker.
+func markJobFailed(jobsRepo *storage.JobsRepo, jobID uuid.UUID, phase string, cause error) {
+	bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := jobsRepo.UpdateStatus(bgCtx, jobID, "failed"); err != nil {
+		log.Error().Err(err).Str("job_id", jobID.String()).Msg("falha ao marcar job como failed")
+		return
+	}
+	if err := jobsRepo.SetLastError(bgCtx, jobID, phase, cause.Error()); err != nil {
+		log.Warn().Err(err).Str("job_id", jobID.String()).Msg("falha ao gravar last_error em metadata")
 	}
 }
 

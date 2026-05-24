@@ -474,6 +474,41 @@ systemctl_enable "mailclear-worker.service"
 ok "Units habilitadas"
 
 # ════════════════════════════════════════════════════════════════════════
+# Etapa 12.5 — Polkit + grupo systemd-journal (ops sem sudo)
+# ════════════════════════════════════════════════════════════════════════
+# Sem isso, os botões "Reiniciar API/Worker" e "Ver logs" do dashboard
+# falham: o user `mailclear` não tem permissão de chamar systemctl via
+# D-Bus nem ler o journal.
+section "Permissões para ops via dashboard"
+
+# 1) Polkit rule: user mailclear pode restartar suas units sem senha
+POLKIT_RULES_DIR="/etc/polkit-1/rules.d"
+if [ -d "/etc/polkit-1" ]; then
+    run "install -d $POLKIT_RULES_DIR"
+    run "install -m 644 $SCRIPT_DIR/deploy/polkit/10-mailclear.rules $POLKIT_RULES_DIR/10-mailclear.rules"
+    # Reinicia polkit pra carregar a regra (idempotente, sem erro se já estiver rodando)
+    if systemctl list-unit-files 2>/dev/null | grep -q "^polkit.service"; then
+        run "systemctl reload polkit 2>/dev/null || systemctl restart polkit"
+    fi
+    ok "Polkit rule instalada — mailclear pode reiniciar suas próprias units"
+else
+    warn "Polkit não detectado; restart via dashboard vai exigir senha"
+fi
+
+# 2) Grupo systemd-journal: leitura de logs sem sudo
+if getent group systemd-journal >/dev/null 2>&1; then
+    if id -nG "$APP_USER" 2>/dev/null | tr ' ' '\n' | grep -qx systemd-journal; then
+        ok "Usuário $APP_USER já está no grupo systemd-journal"
+    else
+        run "usermod -aG systemd-journal $APP_USER"
+        ok "Usuário $APP_USER adicionado ao grupo systemd-journal"
+        warn "Restart de mailclear-api é necessário para o grupo entrar em efeito"
+    fi
+else
+    warn "Grupo systemd-journal não existe; leitura de logs via dashboard pode falhar"
+fi
+
+# ════════════════════════════════════════════════════════════════════════
 # Etapa 13 — Smoke test
 # ════════════════════════════════════════════════════════════════════════
 section "Smoke test"

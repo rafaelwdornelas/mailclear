@@ -28,6 +28,7 @@ type Routes struct {
 	Import    *handlers.ImportHandlers
 	Stats     *handlers.StatsHandlers
 	Admin     *handlers.AdminHandlers
+	AdminOps  *handlers.AdminOpsHandlers
 	Dashboard *handlers.Dashboard
 }
 
@@ -59,6 +60,14 @@ func (r *Routes) Build() http.Handler {
 		router.Post("/admin/jobs/cancel-all", r.Admin.CancelAllRunning)
 	}
 
+	// ── Admin ops (restart, logs, force-fail) ───────────────────────
+	if r.AdminOps != nil {
+		router.Post("/admin/services/restart", r.AdminOps.RestartService)
+		router.Get("/admin/logs", r.AdminOps.Logs)
+		router.Get("/admin/logs/stream", r.AdminOps.LogsStream)
+		router.Post("/admin/jobs/{id}/force-fail", r.AdminOps.ForceFail)
+	}
+
 	// ── API v1 ──────────────────────────────────────────────────────
 	router.Route("/api/v1", func(g chi.Router) {
 		g.Post("/validate", r.Validate.Single)
@@ -72,6 +81,7 @@ func (r *Routes) Build() http.Handler {
 			j.Get("/{id}/results", r.Jobs.Results)
 			j.Get("/{id}/export.csv", r.Jobs.ExportCSV)
 			j.Post("/{id}/cancel", r.Jobs.Cancel)
+			j.Post("/{id}/requeue", r.Jobs.Requeue)
 		})
 
 		g.Get("/stats", r.Stats.Global)
